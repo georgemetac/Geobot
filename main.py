@@ -16,10 +16,16 @@ import dotenv
 from forecasting_tools import (
     BinaryPrediction,
     BinaryQuestion,
+    DateQuestion,
     ForecastBot,
     GeneralLlm,
     MetaculusClient,
     MetaculusQuestion,
+    MultipleChoiceQuestion,
+    NumericDistribution,
+    NumericQuestion,
+    Percentile,
+    PredictedOptionList,
     ReasonedPrediction,
     clean_indents,
     structure_output,
@@ -28,8 +34,6 @@ from forecasting_tools import (
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
-
-# ----------------- math utilities -----------------
 
 def logit(p):
     p = min(1 - 1e-12, max(1e-12, p))
@@ -43,8 +47,6 @@ def sigmoid(x):
 def extremize(p, factor=1.25):
     return min(0.99, max(0.01, sigmoid(logit(p) * factor)))
 
-
-# ----------------- aggregation -----------------
 
 def median(xs):
     return statistics.median(xs)
@@ -69,8 +71,6 @@ def bayesian_weighted(xs, weights):
     return sigmoid(weighted)
 
 
-# ----------------- Monte Carlo -----------------
-
 def monte_carlo_binary(base_prob, volatility=0.1, sims=3000):
     samples = []
     for _ in range(sims):
@@ -79,8 +79,6 @@ def monte_carlo_binary(base_prob, volatility=0.1, sims=3000):
         samples.append(p)
     return sum(samples) / len(samples)
 
-
-# ----------------- search -----------------
 
 class ExaSearcher:
     def __init__(self):
@@ -115,9 +113,10 @@ class LinkupSearcher:
         return json.loads(resp.read().decode()).get("results", [])
 
 
-# ----------------- main bot -----------------
+class Geob(ForecastBot):
 
-class BayesianMonteBot(ForecastBot):
+    _max_concurrent_questions = 1
+    _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
 
     def __init__(self, aggregation="log_odds", *args, **kwargs):
         llms = {
@@ -135,29 +134,31 @@ class BayesianMonteBot(ForecastBot):
             ),
         }
         super().__init__(*args, llms=llms, **kwargs)
-
         self.aggregation = aggregation
         self.exa = ExaSearcher()
         self.linkup = LinkupSearcher()
-
         self.performance_history = []
 
     async def run_research(self, question: MetaculusQuestion):
-        queries = [
-            question.question_text,
-            question.question_text + " base rate",
-            question.question_text + " prediction market",
-        ]
-        snippets = []
-        for q in queries:
-            exa = await self.exa.search(q)
-            link = await self.linkup.search(q)
-            for r in (exa + link)[:3]:
-                snippets.append(f"{r.get('title','')} {r.get('url','')}")
-            await asyncio.sleep(1.0)
-        return "\n".join(snippets)
+        async with self._concurrency_limiter:
+            queries = [
+                question.question_text,
+                question.question_text + " base rate",
+                question.question_text + " prediction market",
+            ]
+            snippets = []
+            for q in queries:
+                try:
+                    exa = await self.exa.search(q)
+                    link = await self.linkup.search(q)
+                    for r in (exa + link)[:3]:
+                        snippets.append(f"{r.get('title','')} {r.get('url','')}")
+                except:
+                    pass
+                await asyncio.sleep(1.2)
+            return "\n".join(snippets)
 
-    async def _run_forecast_on_binary(self, question, research):
+    async def _run_forecast_on_binary(self, question: BinaryQuestion, research):
         prompt = f"""
         Question: {question.question_text}
         Research:
@@ -167,19 +168,70 @@ class BayesianMonteBot(ForecastBot):
         Probability: XX%
         """
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
-
         parsed = await structure_output(
             reasoning,
             BinaryPrediction,
             model=self.get_llm("parser", "llm"),
         )
-
         return ReasonedPrediction(
             prediction_value=parsed.prediction_in_decimal,
             reasoning=reasoning,
         )
 
-    def aggregate_predictions(self, preds):
+    async def _run_forecast_on_multiple_choice(self, question: MultipleChoiceQuestion, research):
+        prompt = f"""
+        Question: {question.question_text}
+        Options: {question.options}
+        Research:
+        {research}
+
+        Provide probabilities for each option.
+        """
+        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        parsed = await structure_output(
+            reasoning,
+            PredictedOptionList,
+            model=self.get_llm("parser", "llm"),
+        )
+        return ReasonedPrediction(
+            prediction_value=parsed,
+            reasoning=reasoning,
+        )
+
+    async def _run_forecast_on_numeric(self, question: NumericQuestion, research):
+        prompt = f"""
+        Question: {question.question_text}
+        Units: {question.unit_of_measure}
+        Research:
+        {research}
+
+        Provide percentiles:
+        Percentile 10:
+        Percentile 20:
+        Percentile 40:
+        Percentile 60:
+        Percentile 80:
+        Percentile 90:
+        """
+        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        percentiles = await structure_output(
+            reasoning,
+            list[Percentile],
+            model=self.get_llm("parser", "llm"),
+        )
+        distribution = NumericDistribution.from_question(percentiles, question)
+        return ReasonedPrediction(
+            prediction_value=distribution,
+            reasoning=reasoning,
+        )
+
+    async def _run_forecast_on_date(self, question: DateQuestion, research):
+        return await self._run_forecast_on_numeric(question, research)
+
+    async def _run_forecast_on_conditional(self, question, research):
+        raise NotImplementedError
+
+    def aggregate_binary(self, preds):
         xs = [p.prediction_value for p in preds]
 
         if self.aggregation == "median":
@@ -188,9 +240,7 @@ class BayesianMonteBot(ForecastBot):
             base = trimmed_mean(xs)
         elif self.aggregation == "bayesian":
             if self.performance_history:
-                weights = [
-                    math.exp(-score) for score in self.performance_history[-len(xs):]
-                ]
+                weights = [math.exp(-score) for score in self.performance_history[-len(xs):]]
             else:
                 weights = [1] * len(xs)
             base = bayesian_weighted(xs, weights)
@@ -209,10 +259,10 @@ class BayesianMonteBot(ForecastBot):
             for _ in range(self.predictions_per_research_report):
                 pred = await self._run_forecast_on_binary(q, research)
                 preds.append(pred)
-            final_prob = self.aggregate_predictions(preds)
+            final_prob = self.aggregate_binary(preds)
             final = ReasonedPrediction(
                 prediction_value=final_prob,
-                reasoning="Aggregated with Bayesian + Monte Carlo",
+                reasoning="Aggregated with Monte + Bayesian + Extremization",
             )
             reports.append(final)
         return reports
@@ -222,15 +272,19 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--aggregation", choices=["median", "trimmed", "log_odds", "bayesian"], default="log_odds")
+    parser.add_argument(
+        "--aggregation",
+        choices=["median", "trimmed", "log_odds", "bayesian"],
+        default="log_odds",
+    )
     args = parser.parse_args()
 
-    bot = BayesianMonteBot(
+    bot = Geob(
         research_reports_per_question=1,
         predictions_per_research_report=5,
-        aggregation=args.aggregation,
         publish_reports_to_metaculus=True,
         skip_previously_forecasted_questions=True,
+        aggregation=args.aggregation,
     )
 
     client = MetaculusClient()
