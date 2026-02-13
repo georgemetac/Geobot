@@ -1,268 +1,252 @@
-import os
-import requests
+import argparse
 import asyncio
+import json
 import logging
-from datetime import datetime, timezone
-from typing import Literal
+import math
+import os
+import random
+import statistics
+import time
+from datetime import datetime
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
 import dotenv
+
 from forecasting_tools import (
-    AskNewsSearcher,
+    BinaryPrediction,
     BinaryQuestion,
     ForecastBot,
     GeneralLlm,
     MetaculusClient,
     MetaculusQuestion,
-    MultipleChoiceQuestion,
-    NumericDistribution,
-    NumericQuestion,
-    DateQuestion,
-    DatePercentile,
-    Percentile,
-    ConditionalQuestion,
-    ConditionalPrediction,
-    PredictionTypes,
-    PredictionAffirmed,
-    BinaryPrediction,
-    PredictedOptionList,
     ReasonedPrediction,
-    SmartSearcher,
     clean_indents,
     structure_output,
 )
 
-# Load environment variables
 dotenv.load_dotenv()
-
-# API Keys from environment
-METACULUS_API_TOKEN = os.getenv("METACULUS_API_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-EXA_API_KEY = os.getenv("EXA_API_KEY")
-LINKUP_API_KEY = os.getenv("LINKUP_API_KEY")
-
-# Configure logging
 logger = logging.getLogger(__name__)
 
-# Metaculus API URL
-METACULUS_API_URL = "https://www.metaculus.com/api2"
 
-# OpenRouter API URL
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1"
+# ----------------- math utilities -----------------
 
-class SpringTemplateBot2026:
-    """
-    Bot that integrates Metaculus and OpenRouter for forecasting and research.
-    """
+def logit(p):
+    p = min(1 - 1e-12, max(1e-12, p))
+    return math.log(p / (1 - p))
 
+
+def sigmoid(x):
+    return 1 / (1 + math.exp(-x))
+
+
+def extremize(p, factor=1.25):
+    return min(0.99, max(0.01, sigmoid(logit(p) * factor)))
+
+
+# ----------------- aggregation -----------------
+
+def median(xs):
+    return statistics.median(xs)
+
+
+def trimmed_mean(xs, trim=0.2):
+    xs = sorted(xs)
+    n = len(xs)
+    k = int(n * trim)
+    if n - 2 * k <= 0:
+        return sum(xs) / len(xs)
+    return sum(xs[k:-k]) / len(xs[k:-k])
+
+
+def log_odds_mean(xs):
+    return sigmoid(sum(logit(x) for x in xs) / len(xs))
+
+
+def bayesian_weighted(xs, weights):
+    logits = [logit(x) for x in xs]
+    weighted = sum(w * l for w, l in zip(weights, logits)) / sum(weights)
+    return sigmoid(weighted)
+
+
+# ----------------- Monte Carlo -----------------
+
+def monte_carlo_binary(base_prob, volatility=0.1, sims=3000):
+    samples = []
+    for _ in range(sims):
+        noise = random.gauss(0, volatility)
+        p = sigmoid(logit(base_prob) + noise)
+        samples.append(p)
+    return sum(samples) / len(samples)
+
+
+# ----------------- search -----------------
+
+class ExaSearcher:
     def __init__(self):
-        self.metaculus_token = METACULUS_API_TOKEN
-        self.openrouter_key = OPENROUTER_API_KEY
-        self.exa_api_key = EXA_API_KEY
-        self.linkup_api_key = LINKUP_API_KEY
+        self.key = os.getenv("EXA_API_KEY")
 
-    ##############################
-    # Metaculus API Integration ##
-    ##############################
-
-    def get_metaculus_tournament_questions(self, tournament_id: str):
-        """
-        Fetches questions from a specific Metaculus tournament using their API.
-        """
-        url = f"{METACULUS_API_URL}/tournaments/{tournament_id}/questions/"
-        headers = {
-            "Authorization": f"Bearer {self.metaculus_token}",
-            "Content-Type": "application/json"
-        }
-        
-        try:
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()  # Check if request was successful
-            questions = response.json()
-            logger.info(f"Fetched {len(questions)} questions from tournament {tournament_id}.")
-            return questions
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error querying Metaculus API: {e}")
+    async def search(self, query):
+        if not self.key:
             return []
+        payload = {"query": query, "num_results": 5}
+        req = Request(
+            "https://api.exa.ai/search",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "x-api-key": self.key},
+            method="POST",
+        )
+        resp = await asyncio.to_thread(urlopen, req)
+        return json.loads(resp.read().decode()).get("results", [])
 
-    ##############################
-    # OpenRouter API Integration ##
-    ##############################
 
-    def query_openrouter(self, model: str, prompt: str) -> str:
-        """
-        Sends a query to OpenRouter for a given model (GPT-5.1 or Claude-Sonnet-4.5).
-        """
-        url = f"{OPENROUTER_API_URL}/models/{model}/completions"
-        headers = {
-            "Authorization": f"Bearer {self.openrouter_key}",
-            "Content-Type": "application/json"
+class LinkupSearcher:
+    def __init__(self):
+        self.key = os.getenv("LINKUP_API_KEY")
+
+    async def search(self, query):
+        if not self.key:
+            return []
+        req = Request(
+            f"https://api.linkup.so/v1/search?{urlencode({'q': query})}",
+            headers={"Authorization": f"Bearer {self.key}"},
+        )
+        resp = await asyncio.to_thread(urlopen, req)
+        return json.loads(resp.read().decode()).get("results", [])
+
+
+# ----------------- main bot -----------------
+
+class BayesianMonteBot(ForecastBot):
+
+    def __init__(self, aggregation="log_odds", *args, **kwargs):
+        llms = {
+            "default": GeneralLlm(
+                model="openrouter/openai/gpt-5.1",
+                temperature=0.25,
+                timeout=60,
+                allowed_tries=2,
+            ),
+            "parser": GeneralLlm(
+                model="openrouter/openai/gpt-5.1",
+                temperature=0,
+                timeout=60,
+                allowed_tries=2,
+            ),
         }
-        data = {
-            "prompt": prompt,
-            "max_tokens": 150
-        }
-        
-        try:
-            response = requests.post(url, json=data, headers=headers)
-            response.raise_for_status()  # Check if request was successful
-            completion = response.json()
-            return completion.get("choices", [{}])[0].get("text", "No completion returned.")
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error querying OpenRouter API: {e}")
-            return "Error: Unable to fetch data from OpenRouter."
+        super().__init__(*args, llms=llms, **kwargs)
 
-    ##############################
-    # Exa API Integration ##
-    ##############################
+        self.aggregation = aggregation
+        self.exa = ExaSearcher()
+        self.linkup = LinkupSearcher()
 
-    def query_exa_api(self, instructions: str) -> str:
-        """
-        Query Exa API for deep research.
-        """
-        url = "https://api.exa.ai/research/v1"
-        headers = {
-            "x-api-key": self.exa_api_key,
-            "Content-Type": "application/json"
-        }
-        data = {"instructions": instructions, "model": "exa-research"}
-        
-        try:
-            response = requests.post(url, json=data, headers=headers)
-            response.raise_for_status()  # Check if request was successful
-            research = response.json()
-            return research.get("research", "No research found")
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error querying Exa API: {e}")
-            return "Error: Unable to fetch data from Exa."
+        self.performance_history = []
 
-    ##############################
-    # LinkUp API Integration ##
-    ##############################
+    async def run_research(self, question: MetaculusQuestion):
+        queries = [
+            question.question_text,
+            question.question_text + " base rate",
+            question.question_text + " prediction market",
+        ]
+        snippets = []
+        for q in queries:
+            exa = await self.exa.search(q)
+            link = await self.linkup.search(q)
+            for r in (exa + link)[:3]:
+                snippets.append(f"{r.get('title','')} {r.get('url','')}")
+            await asyncio.sleep(1.0)
+        return "\n".join(snippets)
 
-    def query_linkup_search(self, query: str) -> str:
-        """
-        Query LinkUp API for search results.
-        """
-        url = "https://api.linkup.so/v1/search"
-        headers = {
-            "Authorization": f"Bearer {self.linkup_api_key}",
-            "Content-Type": "application/json"
-        }
-        data = {"q": query, "depth": "deep", "outputType": "searchResults"}
-        
-        try:
-            response = requests.post(url, json=data, headers=headers)
-            response.raise_for_status()  # Check if request was successful
-            search_results = response.json()
-            return search_results.get("results", "No results found")
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error querying LinkUp API: {e}")
-            return "Error: Unable to fetch data from LinkUp."
-
-    ##############################
-    # Research Aggregation ##
-    ##############################
-
-    async def perform_research_with_exa_and_linkup(self, prompt: str) -> str:
-        """
-        Perform research using both Exa and LinkUp, returns combined results.
-        """
-        exa_research = await asyncio.to_thread(self.query_exa_api, prompt)
-        linkup_research = await asyncio.to_thread(self.query_linkup_search, prompt)
-
-        # Combine both results
-        combined_research = f"Exa Research:\n{exa_research}\n\nLinkUp Research:\n{linkup_research}"
-        return combined_research
-
-    ##############################
-    # Forecasting Methods ##
-    ##############################
-
-    async def _run_forecast_on_binary(self, question: dict, research: str) -> str:
-        base_rate = 0.5  # Example base rate
+    async def _run_forecast_on_binary(self, question, research):
         prompt = f"""
-        You are a professional forecaster.
-        Forecast this binary question based on the given research and historical base rates.
-
-        Question:
-        {question["question_text"]}
-
+        Question: {question.question_text}
         Research:
         {research}
 
-        Forecasting Principles:
-        (a) Start with the base rate (historically, this event has occurred {base_rate*100}% of the time).
-        (b) Consider unexpected scenarios and the status quo.
-        (c) Provide your probability estimate with reasoning.
-
-        Final Answer: Probability: ZZ%
-        Explanation: Based on historical data and the current status, the likelihood of this event occurring is influenced by...
+        Provide reasoning and end with:
+        Probability: XX%
         """
-        return await self.query_openrouter("gpt-5.1", prompt)
+        reasoning = await self.get_llm("default", "llm").invoke(prompt)
 
-    async def _run_forecast_on_multiple_choice(self, question: dict, research: str) -> str:
-        base_rate = [0.25] * len(question["options"])  # Base rate for each option
-        prompt = f"""
-        You are a professional forecaster.
-        Forecast this multiple choice question based on the given research and historical base rates.
+        parsed = await structure_output(
+            reasoning,
+            BinaryPrediction,
+            model=self.get_llm("parser", "llm"),
+        )
 
-        Question:
-        {question["question_text"]}
+        return ReasonedPrediction(
+            prediction_value=parsed.prediction_in_decimal,
+            reasoning=reasoning,
+        )
 
-        Research:
-        {research}
+    def aggregate_predictions(self, preds):
+        xs = [p.prediction_value for p in preds]
 
-        Forecasting Principles:
-        (a) Start with the base rate for each option.
-        (b) Incorporate the status quo for each option.
-        (c) Adjust for unexpected scenarios for each option.
+        if self.aggregation == "median":
+            base = median(xs)
+        elif self.aggregation == "trimmed":
+            base = trimmed_mean(xs)
+        elif self.aggregation == "bayesian":
+            if self.performance_history:
+                weights = [
+                    math.exp(-score) for score in self.performance_history[-len(xs):]
+                ]
+            else:
+                weights = [1] * len(xs)
+            base = bayesian_weighted(xs, weights)
+        else:
+            base = log_odds_mean(xs)
 
-        Final Answer:
-        Option_A: Probability_A
-        Option_B: Probability_B
-        ...
-        Option_N: Probability_N
-        Explanation: The probabilities for each option are calculated based on...
-        """
-        return await self.query_openrouter("gpt-5.1", prompt)
+        base = monte_carlo_binary(base)
+        base = extremize(base)
+        return base
 
-    ##############################
-    # Example Method for Bot ##
-    ##############################
-
-    async def run_research_and_forecast(self, question: dict):
-        """
-        Combines research and forecasting for a given question.
-        """
-        # Fetch research from Exa and LinkUp
-        research = await self.perform_research_with_exa_and_linkup(question["question_text"])
-
-        # Perform forecasting for different question types (binary, multiple choice, etc.)
-        if question["type"] == "binary":
-            forecast = await self._run_forecast_on_binary(question, research)
-        elif question["type"] == "multiple_choice":
-            forecast = await self._run_forecast_on_multiple_choice(question, research)
-
-        logger.info(f"Forecast for {question['question_text']}: {forecast}")
-        return forecast
+    async def forecast_questions(self, questions, return_exceptions=False):
+        reports = []
+        for q in questions:
+            research = await self.run_research(q)
+            preds = []
+            for _ in range(self.predictions_per_research_report):
+                pred = await self._run_forecast_on_binary(q, research)
+                preds.append(pred)
+            final_prob = self.aggregate_predictions(preds)
+            final = ReasonedPrediction(
+                prediction_value=final_prob,
+                reasoning="Aggregated with Bayesian + Monte Carlo",
+            )
+            reports.append(final)
+        return reports
 
 
-# Example of bot instantiation and running research for specific tournaments
 if __name__ == "__main__":
-    bot = SpringTemplateBot2026()
+    logging.basicConfig(level=logging.INFO)
 
-    # Tournament IDs: 32916 and minibench
-    tournament_ids = [32916, "minibench"]
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--aggregation", choices=["median", "trimmed", "log_odds", "bayesian"], default="log_odds")
+    args = parser.parse_args()
 
-    # Fetch questions from specific tournaments and run forecasts
-    for tournament_id in tournament_ids:
-        questions = bot.get_metaculus_tournament_questions(tournament_id)
+    bot = BayesianMonteBot(
+        research_reports_per_question=1,
+        predictions_per_research_report=5,
+        aggregation=args.aggregation,
+        publish_reports_to_metaculus=True,
+        skip_previously_forecasted_questions=True,
+    )
 
-        for question in questions:
-            example_question = {
-                "question_text": question.get("question_text"),
-                "type": "binary",  # Assuming binary questions for simplicity
-                "options": ["Yes", "No"]
-            }
-            # Run research and forecasting asynchronously
-            asyncio.run(bot.run_research_and_forecast(example_question))
+    client = MetaculusClient()
 
+    seasonal = asyncio.run(
+        bot.forecast_on_tournament(
+            client.CURRENT_AI_COMPETITION_ID,
+            return_exceptions=True,
+        )
+    )
+
+    mini = asyncio.run(
+        bot.forecast_on_tournament(
+            client.CURRENT_MINIBENCH_ID,
+            return_exceptions=True,
+        )
+    )
+
+    bot.log_report_summary(seasonal + mini)
