@@ -1,33 +1,3 @@
-"""
-teserlinks.py
-=============
-Teserlinks – an open-source superforecaster bot inspired by the finding that
-disciplined forecasters using public information can outperform domain experts.
-
-Architecture
-------------
-  Primary reasoning  : Claude Opus 4.6    (OpenRouter) – deep analysis
-  Summarization      : Claude Sonnet 4.6  (OpenRouter) – efficient summaries
-  Query decomp/parse : GPT-5.4            (OpenRouter) – structured output
-
-New capabilities (vs. previous version)
-----------------------------------------
-  1. QuestionClassifier     – detects domain (geopolitics, economics, science…)
-                              and geography so research strategy adapts per question.
-  2. ModellingStrategy      – chooses the right forecasting frame per question
-                              (base-rate / trend / analogical / market-signal-led).
-  3. PluggableSourceRegistry– register any number of custom search/data sources;
-                              Tavily is the default. Client-specific sources
-                              (internal databases, specialised APIs) slot in here.
-  4. ForecastValidator      – tracks predictions, computes confidence scores,
-                              flags low-confidence forecasts, persists a validation
-                              ledger to SQLite for calibration analysis.
-  5. ClientSpecialisation   – dataclass injected at construction time; sets domain
-                              focus, trusted source lists, and calibration targets
-                              so the same engine is tunable per client.
-  6. ResearchCache          – persistent SQLite cache (carried forward).
-  7. All previous bug fixes  (double-extremization, concurrency, query cap, etc.)
-"""
 
 import argparse
 import asyncio
@@ -613,9 +583,9 @@ def extremize_probability(p: float, cfg: ExtremizationConfig) -> float:
 # MAIN BOT CLASS
 # ===========================================================================
 
-class Teserlinks(ForecastBot):
+class Geobot(ForecastBot):
     """
-    Teserlinks superforecaster bot.
+    Geobot superforecaster bot.
 
     Inspired by the research finding that structured forecasters using open-source
     information outperform trained domain experts. This engine:
@@ -933,7 +903,7 @@ class Teserlinks(ForecastBot):
             logger.warning(f"[Teserlinks] LLM failed for {question.page_url}: {exc}. Returning 50% prior.")
             return ReasonedPrediction(prediction_value=0.5, reasoning="LLM failed; returning uninformative prior.")
 
-        logger.info(f"[Teserlinks] Reasoning for {question.page_url}: {reasoning}")
+        logger.info(f"[Geobot] Reasoning for {question.page_url}: {reasoning}")
         binary_prediction: BinaryPrediction = await structure_output(
             reasoning, BinaryPrediction,
             model=self.get_llm("parser", "llm"),
@@ -955,7 +925,7 @@ class Teserlinks(ForecastBot):
         profile, strategy = await self._get_profile_and_strategy(question)
         prompt = clean_indents(
             f"""
-            You are Teserlinks, a professional superforecaster.
+            You are Geobot, a professional superforecaster.
             {self._client_context_block()}
             {self._superforecasting_preamble()}
 
@@ -1011,7 +981,7 @@ class Teserlinks(ForecastBot):
         upper_msg, lower_msg = self._create_upper_and_lower_bound_messages(question)
         prompt = clean_indents(
             f"""
-            You are Teserlinks, a professional superforecaster.
+            You are Geobot, a professional superforecaster.
             {self._client_context_block()}
             {self._superforecasting_preamble()}
 
@@ -1077,7 +1047,7 @@ class Teserlinks(ForecastBot):
         upper_msg, lower_msg = self._create_upper_and_lower_bound_messages(question)
         prompt = clean_indents(
             f"""
-            You are Teserlinks, a professional superforecaster.
+            You are Geobot, a professional superforecaster.
             {self._client_context_block()}
             {self._superforecasting_preamble()}
 
@@ -1322,7 +1292,7 @@ if __name__ == "__main__":
         calibration_target=0.15,
     )
 
-    teserlinks = Teserlinks(
+    geobot = Geobot(
         client_spec=spec,
         research_reports_per_question=1,
         predictions_per_research_report=3,
@@ -1349,7 +1319,7 @@ if __name__ == "__main__":
     elif run_mode == "metaculus_cup":
         teserlinks.skip_previously_forecasted_questions = False
         forecast_reports = asyncio.run(
-            teserlinks.forecast_on_tournament(client.CURRENT_METACULUS_CUP_ID, return_exceptions=True)
+            geobot.forecast_on_tournament(client.CURRENT_METACULUS_CUP_ID, return_exceptions=True)
         )
 
     elif run_mode == "test_questions":
@@ -1359,10 +1329,10 @@ if __name__ == "__main__":
             "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",
             "https://www.metaculus.com/c/diffusion-community/38880/how-many-us-labor-strikes-due-to-ai-in-2029/",
         ]
-        teserlinks.skip_previously_forecasted_questions = False
+        geobot.skip_previously_forecasted_questions = False
         questions        = [client.get_question_by_url(u) for u in EXAMPLE_QUESTIONS]
         forecast_reports = asyncio.run(
-            teserlinks.forecast_questions(questions, return_exceptions=True)
+            geobot.forecast_questions(questions, return_exceptions=True)
         )
 
-    teserlinks.log_report_summary(forecast_reports)
+    geobot.log_report_summary(forecast_reports)
