@@ -1404,7 +1404,7 @@ if __name__ == "__main__":
         use_research_summary_to_forecast=False,
         publish_reports_to_metaculus=True,
         folder_to_save_reports_to=None,
-        skip_previously_forecasted_questions=False,
+        skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
     )
 
@@ -1416,7 +1416,7 @@ if __name__ == "__main__":
         use_research_summary_to_forecast=False,
         publish_reports_to_metaculus=True,
         folder_to_save_reports_to=None,
-        skip_previously_forecasted_questions=False,
+        skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
     )
     minibench_geobot._ext_cfg = ExtremizationConfig(
@@ -1440,7 +1440,7 @@ if __name__ == "__main__":
         forecast_reports = r1 + r2 + r3
 
     elif run_mode == "metaculus_cup":
-        geobot.skip_previously_forecasted_questions = False
+        geobot.skip_previously_forecasted_questions = True
         forecast_reports = asyncio.run(
             geobot.forecast_on_tournament(client.CURRENT_METACULUS_CUP_ID, return_exceptions=True)
         )
@@ -1452,7 +1452,7 @@ if __name__ == "__main__":
             "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",
             "https://www.metaculus.com/c/diffusion-community/38880/how-many-us-labor-strikes-due-to-ai-in-2029/",
         ]
-        geobot.skip_previously_forecasted_questions = False
+        geobot.skip_previously_forecasted_questions = True
         questions        = [client.get_question_by_url(u) for u in EXAMPLE_QUESTIONS]
         forecast_reports = asyncio.run(
             geobot.forecast_questions(questions, return_exceptions=True)
