@@ -645,13 +645,14 @@ class Geobot(ForecastBot):
     def __init__(self, *args, client_spec: ClientSpecialisation | None = None, **kwargs):
         llms = kwargs.pop("llms", None)
         if llms is None:
-            opus_llm   = GeneralLlm(model=_CLAUDE_OPUS_MODEL,   temperature=0.15, timeout=90, allowed_tries=3)
-            sonnet_llm = GeneralLlm(model=_CLAUDE_SONNET_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
-            gpt_llm    = GeneralLlm(model=_GPT_MODEL,           temperature=0.15, timeout=60, allowed_tries=3)
+            opus_llm      = GeneralLlm(model=_CLAUDE_OPUS_MODEL,   temperature=0.15, timeout=90, allowed_tries=3)
+            sonnet_llm    = GeneralLlm(model=_CLAUDE_SONNET_MODEL, temperature=0.15, timeout=60, allowed_tries=3)
+            gpt_llm       = GeneralLlm(model=_GPT_MODEL,           temperature=0.15, timeout=60, allowed_tries=3)
+            perplexity_llm = GeneralLlm(model="openrouter/perplexity/sonar-pro", temperature=0.3, timeout=45, allowed_tries=2)
             llms = {
                 "default":    opus_llm,
                 "summarizer": sonnet_llm,
-                "researcher": gpt_llm,
+                "researcher": perplexity_llm,
                 "parser":     gpt_llm,
             }
         super().__init__(*args, llms=llms, **kwargs)
