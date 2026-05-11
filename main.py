@@ -45,9 +45,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Model identifiers
 # ---------------------------------------------------------------------------
-_CLAUDE_OPUS_MODEL   = "openrouter/nvidia/nemotron-3-super-120b-qwen3-coder"
-_CLAUDE_SONNET_MODEL = "openrouter/nvidia/nemotron-3-super-120b-qwen3-coder"
-_GPT_MODEL           = "openrouter/nvidia/nemotron-3-super-120b-qwen3-coder"
+_CLAUDE_OPUS_MODEL   = "openrouter/qwen/qwen3-next-80b-a3b-instruct"
+_CLAUDE_SONNET_MODEL = "openrouter/z-ai/glm-4.5-air:free"
+_GPT_MODEL           = "openrouter/free"
 
 
 # ===========================================================================

@@ -49,9 +49,9 @@ ANSWER_TYPE = BinaryAnswerType()
 # The pipeline can generate rollouts from any model on openrouter and evaluate predictions against the labeled questions.
 # Models are given context about the question from a news search up to the date of the article the question is generated from. 
 MODELS_TO_EVALUATE = [
-    "openai/gpt-4.1-mini",
-    "anthropic/claude-sonnet-4",
-    "google/gemini-2.5-flash",
+    "openrouter/qwen/qwen3-next-80b-a3b-instruct",
+    "openrouter/z-ai/glm-4.5-air:free",
+    "openrouter/free",
 ]
 
 def run_news_eval(lr: LightningRod, max_questions: int) -> list[Sample]:
