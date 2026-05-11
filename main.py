@@ -45,9 +45,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Model identifiers
 # ---------------------------------------------------------------------------
-_CLAUDE_OPUS_MODEL   = "openrouter/anthropic/claude-opus-4-6"
-_CLAUDE_SONNET_MODEL = "openrouter/anthropic/claude-sonnet-4-6"
-_GPT_MODEL           = "openrouter/openai/gpt-5.4"
+_CLAUDE_OPUS_MODEL   = "openrouter/nvidia/nemotron-3-super-120b-qwen3-coder"
+_CLAUDE_SONNET_MODEL = "openrouter/nvidia/nemotron-3-super-120b-qwen3-coder"
+_GPT_MODEL           = "openrouter/nvidia/nemotron-3-super-120b-qwen3-coder"
 
 
 # ===========================================================================
@@ -346,6 +346,43 @@ class TavilySource(BaseSource):
             return f"Query: {query}\n- Search failed: {type(exc).__name__}"
 
 
+class PerplexitySource(BaseSource):
+    """
+    Research source using Perplexity models via OpenRouter.
+    Performs web search and synthesis using online-capable models.
+    """
+    
+    def __init__(self, model: str, llm: GeneralLlm):
+        self.name = f"perplexity_{model.split('/')[-1]}"
+        self._model = model
+        self._llm = llm
+    
+    def is_available(self) -> bool:
+        return self._llm is not None
+    
+    async def fetch(self, query: str) -> str:
+        try:
+            prompt = clean_indents(
+                f"""
+                Search the web and provide research findings for this forecasting query:
+                
+                {query}
+                
+                Return a concise summary of:
+                - Recent developments and trends
+                - Key statistics or data points
+                - Expert opinions or forecasts
+                - Market signals if applicable
+                
+                Be information-dense and cite sources.
+                """
+            )
+            result = await self._llm.invoke(prompt)
+            return f"Query: {query}\n\n{result}"
+        except Exception as exc:
+            return f"Query: {query}\n- Research failed: {type(exc).__name__}: {exc}"
+
+
 # ===========================================================================
 # 4. FORECAST VALIDATOR
 # ===========================================================================
@@ -632,6 +669,20 @@ class Geobot(ForecastBot):
             exclude_domains=self._client_spec.excluded_domains or None,
         ))
 
+        # Register Perplexity models via OpenRouter for parallel web research
+        perplexity_models = [
+            "openrouter/perplexity/sonar-pro",
+            "openrouter/perplexity/sonar-reasoning",
+            "openrouter/perplexity/sonar",
+            "openrouter/openai/gpt-4o:online",
+        ]
+        for model in perplexity_models:
+            try:
+                perplexity_llm = GeneralLlm(model=model, temperature=0.3, timeout=45, allowed_tries=2)
+                self._sources.register(PerplexitySource(model=model, llm=perplexity_llm))
+            except Exception as e:
+                logger.debug(f"[Geobot] Failed to register Perplexity model {model}: {e}")
+
         self._ext_cfg = ExtremizationConfig(
             enabled=os.getenv("EXTREMIZE_ENABLED", "true").lower() in ["1","true","yes","y"],
             factor=float(os.getenv("EXTREMIZE_FACTOR", "1.45")),
@@ -854,6 +905,29 @@ class Geobot(ForecastBot):
             return f"\n## Client Context\n{self._client_spec.extra_context}\n"
         return ""
 
+    def _get_community_median_context(self, question: MetaculusQuestion) -> str:
+        """Extract and format the median community forecast as context."""
+        try:
+            # For binary questions, try to get community prediction
+            if hasattr(question, 'community_prediction') and question.community_prediction is not None:
+                median_prob = question.community_prediction
+                return f"\n## Community Median Prior\nThe median community forecast is currently: {median_prob*100:.1f}%\nUse this as a sanity check and starting anchor, adjusting based on your analysis.\n"
+            
+            # For numeric questions, try to get community estimate
+            elif hasattr(question, 'community_estimate') and question.community_estimate is not None:
+                return f"\n## Community Median Prior\nThe community median estimate is: {question.community_estimate}\nUse this as a reference point for calibration.\n"
+            
+            # Fallback: try prediction_set or crowd_forecast
+            elif hasattr(question, 'prediction_set') and question.prediction_set:
+                predictions = [p for p in question.prediction_set if isinstance(p, (int, float))]
+                if predictions:
+                    median = sorted(predictions)[len(predictions)//2]
+                    return f"\n## Community Median Prior\nMedian of recent forecasts: {median}\n"
+        except Exception as e:
+            logger.debug(f"[Geobot] Failed to extract community median: {e}")
+        
+        return ""
+
     # -------------------------------------------------------------------
     # Binary
     # -------------------------------------------------------------------
@@ -862,6 +936,7 @@ class Geobot(ForecastBot):
         self, question: BinaryQuestion, research: str
     ) -> ReasonedPrediction[float]:
         profile, strategy = await self._get_profile_and_strategy(question)
+        median_context = self._get_community_median_context(question)
         prompt = clean_indents(
             f"""
             You are Teserlinks, a professional superforecaster.
@@ -878,6 +953,7 @@ class Geobot(ForecastBot):
             {question.fine_print}
             Research: {research}
             Today is {datetime.now().strftime("%Y-%m-%d")}.
+            {median_context}
 
             Reason step-by-step:
             (a) Reference class and base rate
@@ -923,6 +999,7 @@ class Geobot(ForecastBot):
         self, question: MultipleChoiceQuestion, research: str
     ) -> ReasonedPrediction[PredictedOptionList]:
         profile, strategy = await self._get_profile_and_strategy(question)
+        median_context = self._get_community_median_context(question)
         prompt = clean_indents(
             f"""
             You are Geobot, a professional superforecaster.
@@ -940,6 +1017,7 @@ class Geobot(ForecastBot):
             {question.fine_print}
             Research: {research}
             Today is {datetime.now().strftime("%Y-%m-%d")}.
+            {median_context}
 
             Reason step-by-step:
             (a) Base rate – how often does each option type win?
@@ -979,6 +1057,7 @@ class Geobot(ForecastBot):
     ) -> ReasonedPrediction[NumericDistribution]:
         profile, strategy = await self._get_profile_and_strategy(question)
         upper_msg, lower_msg = self._create_upper_and_lower_bound_messages(question)
+        median_context = self._get_community_median_context(question)
         prompt = clean_indents(
             f"""
             You are Geobot, a professional superforecaster.
@@ -998,6 +1077,7 @@ class Geobot(ForecastBot):
             Today is {datetime.now().strftime("%Y-%m-%d")}.
             {lower_msg}
             {upper_msg}
+            {median_context}
 
             Formatting: no scientific notation; percentiles must be strictly increasing.
 
@@ -1045,6 +1125,7 @@ class Geobot(ForecastBot):
     ) -> ReasonedPrediction[NumericDistribution]:
         profile, strategy = await self._get_profile_and_strategy(question)
         upper_msg, lower_msg = self._create_upper_and_lower_bound_messages(question)
+        median_context = self._get_community_median_context(question)
         prompt = clean_indents(
             f"""
             You are Geobot, a professional superforecaster.
@@ -1063,6 +1144,7 @@ class Geobot(ForecastBot):
             Today is {datetime.now().strftime("%Y-%m-%d")}.
             {lower_msg}
             {upper_msg}
+            {median_context}
 
             Formatting: dates must be YYYY-MM-DD; percentiles chronological and strictly increasing.
 
@@ -1303,21 +1385,39 @@ if __name__ == "__main__":
         extra_metadata_in_explanation=True,
     )
 
+    # Create a separate bot for minibench with extremization factor 4.3
+    minibench_geobot = Geobot(
+        client_spec=spec,
+        research_reports_per_question=1,
+        predictions_per_research_report=3,
+        use_research_summary_to_forecast=False,
+        publish_reports_to_metaculus=True,
+        folder_to_save_reports_to=None,
+        skip_previously_forecasted_questions=True,
+        extra_metadata_in_explanation=True,
+    )
+    minibench_geobot._ext_cfg = ExtremizationConfig(
+        enabled=True,
+        factor=4.3,
+        floor=0.02,
+        ceil=0.98,
+    )
+
     # -----------------------------------------------------------------------
     # Register additional client sources here, e.g.:
-    #   teserlinks.register_source(MyProprietaryDB())
+    #   geobot.register_source(MyProprietaryDB())
     # -----------------------------------------------------------------------
 
     client = MetaculusClient()
 
     if run_mode == "tournament":
-        r1 = asyncio.run(teserlinks.forecast_on_tournament(client.CURRENT_AI_COMPETITION_ID, return_exceptions=True))
-        r2 = asyncio.run(teserlinks.forecast_on_tournament(client.CURRENT_MINIBENCH_ID,       return_exceptions=True))
-        r3 = asyncio.run(teserlinks.forecast_on_tournament("market-pulse-26q1",               return_exceptions=True))
+        r1 = asyncio.run(geobot.forecast_on_tournament("33022", return_exceptions=True))
+        r2 = asyncio.run(minibench_geobot.forecast_on_tournament(client.CURRENT_MINIBENCH_ID, return_exceptions=True))
+        r3 = asyncio.run(geobot.forecast_on_tournament("market-pulse-26q2",                   return_exceptions=True))
         forecast_reports = r1 + r2 + r3
 
     elif run_mode == "metaculus_cup":
-        teserlinks.skip_previously_forecasted_questions = False
+        geobot.skip_previously_forecasted_questions = False
         forecast_reports = asyncio.run(
             geobot.forecast_on_tournament(client.CURRENT_METACULUS_CUP_ID, return_exceptions=True)
         )
