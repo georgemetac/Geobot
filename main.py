@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Model identifiers
 # ---------------------------------------------------------------------------
 _CLAUDE_OPUS_MODEL   = "openrouter/openai/o4-mini"
-_CLAUDE_SONNET_MODEL = "openrouter/z-ai/glm-4.5-air:free"
+_CLAUDE_SONNET_MODEL = "openrouter/perplexity/sonar-pro-search"
 _GPT_MODEL           = "openrouter/openai/o3"
 
 
