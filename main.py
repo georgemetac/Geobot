@@ -45,9 +45,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Model identifiers
 # ---------------------------------------------------------------------------
-_CLAUDE_OPUS_MODEL   = "openrouter/qwen/qwen3-next-80b-a3b-instruct"
+_CLAUDE_OPUS_MODEL   = "openrouter/openai/o4-mini"
 _CLAUDE_SONNET_MODEL = "openrouter/z-ai/glm-4.5-air:free"
-_GPT_MODEL           = "openrouter/openai/gpt-5.1"
+_GPT_MODEL           = "openrouter/openai/o3"
 
 
 # ===========================================================================
