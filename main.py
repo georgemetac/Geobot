@@ -1417,7 +1417,7 @@ if __name__ == "__main__":
         publish_reports_to_metaculus=True,
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=False,
-        extra_metadata_in_explanation=True,
+        extra_metadata_in_explanation=False,
     )
     minibench_geobot._ext_cfg = ExtremizationConfig(
         enabled=True,
