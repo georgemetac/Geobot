@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _CLAUDE_OPUS_MODEL   = "openrouter/openai/o4-mini"
 _CLAUDE_SONNET_MODEL = "openrouter/perplexity/sonar-pro-search"
-_GPT_MODEL           = "openrouter/openai/o3"
+_GPT_MODEL           = "openrouter/openai/gpt-5.1"
 
 
 # ===========================================================================
@@ -1404,8 +1404,8 @@ if __name__ == "__main__":
         use_research_summary_to_forecast=False,
         publish_reports_to_metaculus=True,
         folder_to_save_reports_to=None,
-        skip_previously_forecasted_questions=True,
-        extra_metadata_in_explanation=True,
+        skip_previously_forecasted_questions=False,
+        extra_metadata_in_explanation=False,
     )
 
     # Create a separate bot for minibench with extremization factor 4.3
